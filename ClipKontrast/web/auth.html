@@ -129,6 +129,7 @@ $("google").href = "/auth/google/start?next=" + encodeURIComponent(dest);
 const fail = m => { $("err").textContent = m; $("err").classList.add("on"); };
 if (new URLSearchParams(location.search).get("error") === "google") fail("Google sign-in didn't finish. Try again, or use your email.");
 fetch("/api/public").then(r => r.json()).then(p => {
+  if (p.signup === false) { $("swap").hidden = true; if (up) location.replace("/login"); }
   if (p.google) { $("google").hidden = false; $("or").hidden = false; }
 }).catch(() => {});
 $("f").addEventListener("submit", async e => {

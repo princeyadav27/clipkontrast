@@ -46,6 +46,8 @@ def main() -> int:
             print("The test server did not start.")
             return 1
         runs = [("permissions", ["tests/test_permissions.py", BASE, str(ROOT), sys.executable]),
+                ("private notebook", ["tests/test_notebook.py"]),
+                ("project export and verified storage", ["tests/test_project_archive.py"]),
                 ("abuse and limits", ["tests/test_abuse.py", BASE, str(ROOT)]),
                 ("queue under load", ["tests/test_load_queue.py", str(ROOT)]),
                 ("deleting and bulk actions", ["tests/test_delete.py"]),

@@ -1,3 +1,37 @@
+# Run ClipKontrast entirely on Kaggle
+
+Use [ClipKontrast.ipynb](ClipKontrast.ipynb) for **browser → HTTPS tunnel → the entire app on Kaggle**. No local server, ASR token, second notebook, or inbound Kaggle port is required. The notebook runs the existing dashboard, API, job queue, speech model, FFmpeg renderer and SQLite database together. The older [speech worker](#a-free-graphics-card-for-transcription-kaggle-notebooks) below is a different mode for people running the app on their PC.
+
+1. Import `ClipKontrast.ipynb` into a **private** Kaggle notebook. Select **GPU T4** and enable **Internet**. Attach this version of the project as a **private code-only dataset**: include `studio/`, `web/`, `requirements.txt` and `deploy/kaggle/`; do not include `.env`, `data/`, virtual environments or credentials. Set `PROJECT` in the cell to the mounted directory containing `requirements.txt`. A trusted checkout of this version under `/kaggle/working` works too.
+2. In **Add-ons → Secrets**, add `CLIPKONTRAST_NOTEBOOK_PASSWORD` (a unique random password of 16–200 characters) and grant this notebook access. Never type the value into a cell. No AI key is required to try clipping.
+3. Run the cell. It installs dependencies outside notebook outputs, checks for FFmpeg/ffprobe, loads the GPU speech model, and prints **one HTTPS `/app` link** when the backend is ready. Sign in with `owner@notebook.invalid` and your notebook password. Public registration and Google sign-in are disabled; knowing the link alone does not grant access.
+4. **Upload → Make clips → open a clip → edit/re-render → download**. Files and job state are under `/kaggle/working/clipkontrast-data/`; finished MP4s are in the user's job `clips/` folders. Video rendering uses the app's encoder selection (including CPU fallback); speech uses CUDA locally in the notebook. Optional AI highlight selection contacts the provider you configure in Settings; without it, selection uses loudness.
+5. Download your clips before stopping the session. Interrupt the cell to stop the server and tunnel. A new run gets a new URL; restarting the cell in the same session reuses its database. **`/kaggle/working` is session storage, not a permanent drive.** To keep exports across sessions, save the finished MP4s privately. Do **not** publish the whole working directory: it can contain source videos, transcripts, password hashes, AI keys and connected-account tokens. If you change your password in the dashboard, update the Kaggle secret before relaunching.
+
+## Downloads, backups and recovery
+
+Kaggle does **not** promise advance notice of termination. The dashboard keeps a session-loss warning visible from the start. Download or verify a backup while the cell is still running, not when the GPU has already disconnected.
+
+- **One MP4:** use Download on its clip card. **Selected clips:** check the clips and use Download. **All finished clips:** Settings → Storage → Download all finished clips. These ZIPs contain the rendered videos, not the original footage.
+- **One editable project:** choose **Export project** on a finished video's card. The ZIP contains `project.json` (format version, file inventory, clip timings, titles, caption/layout options and creator settings), available source video or saved source segments, transcript, rendered clips, covers and caption sidecars. A project means one video/recording. This is not a backup of logins, posting accounts, API keys, the database, speech models, transient live buffers or unfinished work.
+- **Where things live:** active projects live under `clipkontrast-data/users/`; upload parts, renderer scratch space and outgoing ZIPs use `clipkontrast-data/tmp/`. Put your own project ZIPs to restore under `clipkontrast-data/imports/`. Cleanup removes application staging files, not clips, source media or imports. A downloaded file is **not** labeled as a verified cloud backup.
+- **Restore without a cloud account:** attach a trusted project ZIP as a private Kaggle dataset. Before running the launcher, copy the ZIP into `/kaggle/working/clipkontrast-data/imports/` (create the directory if needed). In Settings → Storage choose **Restore local ZIP**. Keep the ZIP until you have checked the restored project. Restored projects appear in Videos with new IDs; any original creator settings are retained in project metadata, not activated as watch/post automation.
+
+### Optional persistent storage: private Amazon S3 bucket
+
+S3 is independent of the notebook session and is **off by default**. AWS storage, requests and readback can incur charges. Use a private bucket with public access blocked. Give this notebook a dedicated prefix; anyone with access to that prefix can read its video content. Scope its AWS credentials to list that prefix and get/put objects there (including multipart uploads and aborting incomplete multipart uploads). Do not grant public access or bucket-wide administrative permissions.
+
+1. Add/grant `CLIPKONTRAST_BACKUP_BUCKET`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in Kaggle Secrets. For temporary credentials also pass `AWS_SESSION_TOKEN`. Set **`USE_S3 = True`** in the launch cell. Set its prefix to your private workspace name and use the **same bucket and prefix on subsequent sessions**. Alternatively, supply these variables along with `CLIPKONTRAST_BACKUP_PREFIX` and `CLIPKONTRAST_BACKUP_AUTO` via the environment before launch. Do not paste credentials into cell text or a tracked `.env`.
+2. Set `CLIPKONTRAST_BACKUP_AUTO` to `1` for automatic backup, or `0` for manual only. The scheduler checks every 15 seconds. It checkpoints finished clips while a job is active and backs up the completed project, including later edits. Transfers are serialized; temporary failures retry after five minutes. **Wait for verification** before ending the session. A live checkpoint restores finished clips only; it does not resume the live recording.
+3. In **Settings → Storage**, back up one complete project or all projects manually. Watch the transfer phase and verification percentage there; successes and failures also appear in the notification bell. A receipt refers to the version last read back from S3, not a promise against later deletion in AWS. New local edits are not marked as backed up.
+4. In a fresh notebook using that prefix, choose **Find S3 snapshots → Restore as new project**. Only committed snapshots are listed. The server validates the downloaded size and SHA-256, checks the ZIP inventory and available disk space, then publishes the restored files together. A failed restore does not replace an existing project. Restoring needs space for the ZIP **and** the unpacked project, plus the app's disk reserve.
+
+Older snapshots are retained, not pruned by ClipKontrast. Manage retention and incomplete multipart uploads in S3; if you remove a snapshot, remove its matching `verified/` marker as well. Treat snapshots as private user content.
+
+**Troubleshooting:** No GPU or CUDA error? Check the accelerator and Kaggle's GPU quota. The launcher requires a compatible Linux Python/CUDA 12/cuDNN 9 image. If `ffmpeg` or `ffprobe` is missing, install the notebook OS's `ffmpeg` package before retrying. First launch needs room for dependencies, the ~1.3 GB model, uploads and rendered clips. If a tunnel or model download fails, check Internet access and restart the cell. This mode is for an interactive session, not permanent hosting or stable OAuth callback URLs. Use it only where allowed by Kaggle and the tunnel provider.
+
+---
+
 # A free graphics card for transcription: Kaggle notebooks
 
 A Kaggle notebook with a **Tesla T4** can do the speech-to-text for ClipKontrast many times faster than a laptop,
@@ -32,7 +66,7 @@ Nothing on your computer changes: it keeps the videos, the clips and the dashboa
 1. Start the notebook and run one cell:
 
    ```
-   %cd /kaggle/working/clipkontrast
+   %cd /kaggle/working/clipkontrast/ClipKontrast
    !python deploy/kaggle/worker.py
    ```
 

@@ -35,6 +35,7 @@ MAX_PIECE = 16000 * 40                  # a piece is 12 to 24 seconds; 40 is the
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 _stats = {"pieces": 0, "audio_s": 0.0, "busy_s": 0.0, "since": time.time()}
 _slock = threading.Lock()
+_admit = threading.BoundedSemaphore(PARALLEL + 4)  # bounded waiting room for normal bursts
 _slots = threading.BoundedSemaphore(PARALLEL)
 _state = {"ready": False, "note": "", "device": transcribe.PROVIDER, "model": config.ASR_MODEL_NAME}
 
@@ -123,16 +124,36 @@ def probe(request: Request):
 async def decode(request: Request):
     if not _allowed(request):
         raise HTTPException(401, "no")
+    # Admission before buffering/converting audio: requests beyond the GPU's capacity
+    # must not accumulate in memory, or block the event loop while waiting for a slot.
+    if not _admit.acquire(blocking=False):
+        raise HTTPException(503, "speech machine is busy")
+    try:
+        return await _decode(request)
+    finally:
+        _admit.release()
+
+
+async def _decode(request: Request):
     try:
         lens = [int(x) for x in request.headers.get("x-lens", "").split(",") if x]
     except ValueError:
         raise HTTPException(400, "bad lengths")
     if not lens or len(lens) > 256 or any(n <= 0 or n > MAX_PIECE for n in lens):
         raise HTTPException(400, "bad lengths")
-    if int(request.headers.get("content-length") or 0) > MAX_BODY:
+    expected = 2 * sum(lens)
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        raise HTTPException(400, "bad content length")
+    if expected > MAX_BODY or declared > MAX_BODY:
         raise HTTPException(413, "too much")
-    body = await request.body()
-    if len(body) != 2 * sum(lens) or len(body) > MAX_BODY:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > expected:
+            raise HTTPException(400, "lengths do not match the audio")
+        body.extend(chunk)
+    if len(body) != expected:
         raise HTTPException(400, "lengths do not match the audio")
     if not _state["ready"]:
         # The app finishes these pieces on its own processor, and Settings shows this note.
@@ -144,6 +165,10 @@ async def decode(request: Request):
         pos += n
 
     def work():
+        with _slots:  # wait in the thread, never on the event loop
+            return decode_batches()
+
+    def decode_batches():
         t0 = time.time()
         out = []
         for i in range(0, len(pieces), max(1, CARD_BATCH)):
@@ -156,8 +181,7 @@ async def decode(request: Request):
 
     import anyio
     try:
-        with _slots:                                  # a second request waits for the card instead of fighting for it
-            got = await anyio.to_thread.run_sync(work)
+        got = await anyio.to_thread.run_sync(work)
     except Exception as e:  # noqa: BLE001 - a broken or overloaded card must answer, not crash the worker
         raise HTTPException(503, _plain(e))
     return {"pieces": [{"tokens": tok, "timestamps": ts} for tok, ts in got]}

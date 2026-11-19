@@ -339,7 +339,7 @@ def cookie_args(token: str) -> dict:
 
 # ---------------------------------------------------------------- Sign in with Google
 def google_ready() -> bool:
-    return all(config.google_client())
+    return config.PUBLIC_SIGNUP and all(config.google_client())
 
 
 def google_url(next_path: str = "/app") -> tuple:

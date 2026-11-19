@@ -20,7 +20,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from . import admin as admins
-from . import account, load
+from . import account, backups, project_archive, load
 from . import (accounts, ai, alerts, auth, config, creators, ctx, db, jobs, live, media, posting,
                profiles, render, safe, transcribe, usage)
 
@@ -72,6 +72,9 @@ def _startup():
             f.unlink()
         except OSError:
             pass
+    # Only our own interrupted download staging files, never projects, inputs or user exports.
+    for f in (config.TMP_DIR / "exports").glob("export-*.zip"):
+        f.unlink(missing_ok=True)
     render.install_fonts()
     if _tools.missing():
         print("\n  " + _tools.HELP + "\n", flush=True)
@@ -80,6 +83,7 @@ def _startup():
     jobs.start()
     live.start()
     posting.start()
+    backups.start()
     from . import updates
     updates.start()                  # looks for a newer ClipKontrast every minute, in the background
 
@@ -279,7 +283,10 @@ def _from_here(req, must_say=False) -> bool:
     fake that mark. Comparing the page's address with the address the request arrived at is only the fallback,
     because that comparison goes wrong when something in between rewrites either of them (a proxy, an antivirus
     web shield, a browser extension), which made every save fail with "Cross-site requests are not allowed"."""
-    if (req.headers.get("sec-fetch-site") or "").lower() == "same-origin":
+    site = (req.headers.get("sec-fetch-site") or "").lower()
+    if site == "cross-site":
+        return False
+    if site == "same-origin":
         return True
     origin = (req.headers.get("origin") or "").rstrip("/").lower()
     if not origin:
@@ -446,7 +453,7 @@ def favicon():
 @app.get("/api/public")
 def public_config():
     from . import mailer
-    return {"google": auth.google_ready(), "mail": mailer.ready(), "verify_email": config.VERIFY_EMAIL}
+    return {"signup": config.PUBLIC_SIGNUP, "google": auth.google_ready(), "mail": mailer.ready(), "verify_email": config.VERIFY_EMAIL}
 
 
 def _signed_in(request: Request, user, first: bool, redirect=None):
@@ -458,6 +465,8 @@ def _signed_in(request: Request, user, first: bool, redirect=None):
 
 @app.post("/api/auth/signup")
 def signup(request: Request, body: dict = Body(...)):
+    if not config.PUBLIC_SIGNUP:
+        raise HTTPException(403, "Registration is closed on this server.")
     try:
         auth.throttle("signup:" + _ip(request), 8, 3600)
         user, first = auth.signup(str(body.get("email", "")), str(body.get("password", "")), str(body.get("name", "")))
@@ -566,7 +575,7 @@ def google_start(next: str = "/app"):
 
 @app.get("/auth/google/callback")
 def google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-    if error or not code or not state or not hmac.compare_digest(request.cookies.get("g_state", ""), state):
+    if not auth.google_ready() or error or not code or not state or not hmac.compare_digest(request.cookies.get("g_state", ""), state):
         return RedirectResponse("/login?error=google", 303)
     try:
         auth.throttle("google:" + _ip(request), 30, 600)
@@ -582,7 +591,7 @@ def status(request: Request):
     from . import notices
     from . import updates
     me_ = _me(request)
-    return {"user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "ai": usage.brief(),
+    return {"notebook": backups.NOTEBOOK, "user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "ai": usage.brief(),
             "speech": transcribe.status() if me_.is_admin else None, "unread": notices.unread(),
             "tour": not accounts.settings()["tour_done"],
             "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES}, "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
@@ -993,13 +1002,25 @@ def bulk_delete(body: dict = Body(...)):
 def clips_zip(ids: str = ""):
     """Many clips as one download. `ids` is video.clip pairs separated by commas."""
     _throttle("zip:" + ctx.uid(), 12, 600, "Give it a moment: you just downloaded several groups of clips.")
-    pairs = _pairs([p.split(".", 1) for p in ids.split(",") if "." in p][:300])
+    if ids == "all":
+        pairs = [(j['id'], c['id']) for j in jobs.list_jobs() for c in j['clips'] if c.get('status') == 'done']
+    else:
+        requested = ids.split(',')
+        pairs = _pairs([p.split('.', 1) for p in requested])
+        if len(pairs) != len(requested):
+            raise HTTPException(400, "Select up to 300 finished clips, or download all clips.")
     try:
-        f = account.zip_clips(pairs)
+        f = account.zip_clips(pairs, limit_gb=0 if ids == 'all' else 4)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except OSError:
+        raise HTTPException(507, "Could not finish writing the archive. Check available space.")
+    return _zip_response(f, f"clipkontrast-clips-{len(pairs)}.zip")
+
+
+def _zip_response(f, name):
     from starlette.background import BackgroundTask
-    return FileResponse(f, filename=f"clipkontrast-clips-{len(pairs)}.zip", media_type="application/zip",
+    return FileResponse(f, filename=name, media_type="application/zip",
                         headers={"Cache-Control": "private, no-store"}, background=BackgroundTask(lambda: f.unlink(missing_ok=True)))
 
 
@@ -1406,7 +1427,53 @@ def public_clip(token: str):
 def _on_this_computer(request: Request) -> bool:
     """Is the person sitting at the computer ClipKontrast runs on? Only then can a folder window be opened for them."""
     host = request.client.host if request.client else ""
-    return host in ("127.0.0.1", "::1", "localhost") and not config.env("CLIPKONTRAST_TRUST_PROXY")
+    return not config.HTTPS and host in ("127.0.0.1", "::1", "localhost") and not config.env("CLIPKONTRAST_TRUST_PROXY")
+
+
+@app.get("/api/projects/{jid}/export")
+def export_project(jid: str):
+    _job_or_404(jid)
+    _throttle("projectzip:" + ctx.uid(), 12, 600)
+    try:
+        path, _ = project_archive.export(jid)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except OSError:
+        raise HTTPException(507, "Could not finish writing the project archive. Check available space.")
+    return _zip_response(path, f"project-{jid}.zip")
+
+
+def _notebook_owner(request):
+    _admin(request)
+    if not backups.NOTEBOOK or not config.ACCOUNTS or config.PUBLIC_SIGNUP:
+        raise HTTPException(404)
+
+
+@app.get("/api/backups")
+def backup_status(request: Request):
+    _notebook_owner(request)
+    return backups.status()
+
+
+@app.get("/api/backups/snapshots")
+def snapshots(request: Request):
+    _notebook_owner(request)
+    if not backups.enabled():
+        raise HTTPException(400, "Configure S3 backup first.")
+    try:
+        return backups.catalogue()
+    except Exception:
+        raise HTTPException(502, "Could not list snapshots. Check S3 credentials, bucket and region.")
+
+
+@app.post("/api/backups/{action}", status_code=202)
+def backup_action(action: str, request: Request, body: dict = Body(...)):
+    _notebook_owner(request)
+    try:
+        backups.submit(action, str(body.get('id') or ''))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"queued": True}
 
 
 @app.get("/api/storage")

@@ -1,9 +1,9 @@
 """The "new version" notice: the version here is read from .git, GitHub is asked what is newer (a stand-in here,
 so nothing leaves this machine), and only the owner is told."""
-import json, os, sys, tempfile
+import importlib, json, os, sys, tempfile
 from pathlib import Path
 os.environ["CLIPKONTRAST_DATA"] = tempfile.mkdtemp(prefix="pc-upd-")
-os.environ.update(CLIPKONTRAST_UPDATE_CHECK="1", DATABASE_URL="", CLIPKONTRAST_ACCOUNTS="0", CLIPKONTRAST_PUBLIC_URL="http://127.0.0.1:8765", CLIPKONTRAST_AI_KEY="", CLIPKONTRAST_AI_MODELS="")
+os.environ.update(CLIPKONTRAST_UPDATE_REPO="example/clipkontrast", CLIPKONTRAST_UPDATE_CHECK="1", DATABASE_URL="", CLIPKONTRAST_ACCOUNTS="0", CLIPKONTRAST_PUBLIC_URL="http://127.0.0.1:8765", CLIPKONTRAST_AI_KEY="", CLIPKONTRAST_AI_MODELS="")
 sys.path.insert(0, ".")
 from fastapi.testclient import TestClient
 from studio import config, db, server, updates
@@ -27,8 +27,10 @@ check("the branch's commit is read", updates.current(), "a" * 40)
 check("...also when git has packed it away", updates.current(), "b" * 40)
 (fake / ".git" / "HEAD").write_text("c" * 40 + "\n")
 check("...and on a single commit", updates.current(), "c" * 40)
-config.ROOT = real_root
-check("this folder's own version is found", len(updates.current()), 40)
+# A notebook dataset/zip need not contain .git, and the checkout can be nested.
+# Simulate starting the module in our fixture checkout instead of relying on either layout.
+importlib.reload(updates)
+check("startup remembers the fixture checkout", updates.RUNNING, "c" * 40)
 
 # ---- asking GitHub: one small question a minute, and the list of changes only when something is new
 class R:
@@ -94,6 +96,7 @@ updates.httpx.get = boom
 check("offline for a moment: the notice stays, no error", updates.check(force=True), shown)
 
 # ---- only the owner is told
+config.ROOT = real_root
 updates.httpx.get = fake_get
 c = TestClient(server.app, base_url="http://127.0.0.1:8765")
 st = c.get("/api/status").json()
