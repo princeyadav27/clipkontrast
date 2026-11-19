@@ -64,6 +64,10 @@ r = client.post("/decode", content=b"\x00" * 200, headers={"X-Lens": "100", **GO
 asr_worker.MAX_BODY = real_max
 check("a request that is too big is refused with 413", r.status_code, 413)
 
+# Streamed requests do not have to declare Content-Length. Enforce the actual byte count too.
+r = client.post("/decode", content=iter([b"a", b"bc"]), headers={"X-Lens": "1", **GOOD})
+check("stream must fit its declared audio shape", r.status_code, 400)
+
 # ---- a good request, with the model stubbed out
 heard = []
 

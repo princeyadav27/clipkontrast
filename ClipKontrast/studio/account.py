@@ -7,7 +7,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from . import auth, config, creators, ctx, db, jobs, live, usage
+from . import project_archive, auth, config, creators, ctx, db, jobs, live, usage
 
 
 class Busy(Exception):
@@ -83,31 +83,35 @@ def zip_clips(clip_ids: list, limit_gb: float = 4.0) -> Path:
         job = jobs.get(jid)
         clip = next((c for c in (job or {}).get("clips", []) if c["id"] == cid and c.get("status") == "done"), None)
         if not clip or not clip.get("file"):
-            continue
+            raise ValueError("A selected clip is not ready to download.")
         f = Path(job["dir"]) / "clips" / Path(str(clip["file"])).name
-        if not f.is_file():
-            continue
+        if not f.is_file() or f.stat().st_size == 0:
+            raise ValueError("A clip file is missing or empty.")
         total += f.stat().st_size
-        if total > limit_gb * 1e9:
+        if limit_gb and total > limit_gb * 1e9:
             raise ValueError(f"That is more than {limit_gb:g} GB of clips. Download them in smaller groups.")
         base = "".join(ch if ch.isalnum() or ch in " -_" else "" for ch in (clip.get("title") or clip.get("hook") or cid))[:60].strip() or cid
         name, n = f"{base}.mp4", 2
         while name.lower() in seen:
             name, n = f"{base} ({n}).mp4", n + 1
         seen.add(name.lower())
-        files.append((f, name))
+        files.append((f, name, f.stat()))
     if not files:
         raise ValueError("None of those clips are ready to download.")
-    tmp = config.user_dir(ctx.uid()) / "tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    for old in tmp.glob("clips-*.zip"):                       # leftovers from downloads that were abandoned
-        if time.time() - old.stat().st_mtime > 3600:
-            old.unlink(missing_ok=True)
-    out = tmp / f"clips-{int(time.time() * 1000)}.zip"
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-        for f, name in files:
-            z.write(f, name)
-    return out
+    project_archive.space(config.TMP_DIR, total + 1024 * len(files))
+    out = project_archive.temporary()
+    try:
+        with zipfile.ZipFile(out, "w") as z:
+            for f, name, _ in files:
+                z.write(f, name)
+        with zipfile.ZipFile(out) as z:
+            if z.testzip() or any(z.getinfo(n).file_size != st.st_size or f.stat().st_mtime_ns != st.st_mtime_ns
+                                  for f, n, st in files):
+                raise ValueError("The clips changed during export. Try again.")
+        return out
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------- creators

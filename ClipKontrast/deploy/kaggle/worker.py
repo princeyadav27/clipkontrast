@@ -17,6 +17,8 @@ The tunnel is free and needs no account. Its address changes every session and i
 of the worker, including its health check, needs the shared secret. The token itself is never printed.
 """
 import argparse
+import hashlib
+import tempfile
 import os
 import re
 import shutil
@@ -27,7 +29,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent      # the project folder
 TUNNEL_BIN = Path("/kaggle/working/bin/cloudflared")
-TUNNEL_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+TUNNEL_URL = "https://github.com/cloudflare/cloudflared/releases/download/2026.11.1/cloudflared-linux-amd64"
+TUNNEL_SHA256 = "97bb3b02d23a5980fc9c15a1a270e692da1923f103f920d5b16d4931d5ab55e7"
 # Only what the worker itself imports. The notebook's own stack (torch, its CUDA, numpy's version) is left alone:
 # installing the project's whole requirements.txt here would move versions Kaggle depends on.
 WORKER_DEPS = ("fastapi", "uvicorn", "numpy")
@@ -44,8 +47,7 @@ def say(text=""):
 
 
 def secret() -> str:
-    """The shared secret: from the Kaggle secret of that name, else from the environment, else a new one written to
-    a file in /kaggle/working. It is never printed: only where it was put."""
+    """Require a configured secret. Never leave one in notebook outputs."""
     got = os.environ.get("CLIPKONTRAST_ASR_TOKEN", "").strip()
     if got:
         return got
@@ -56,18 +58,7 @@ def secret() -> str:
         got = ""
     if got:
         return got
-    import secrets
-    got = secrets.token_urlsafe(32)
-    where = Path("/kaggle/working/clipkontrast-asr-token.txt") if Path("/kaggle/working").is_dir() else ROOT / "asr-token.txt"
-    where.write_text(got + "\n", encoding="utf-8")
-    try:
-        where.chmod(0o600)
-    except OSError:
-        pass
-    say(f"  A new shared secret was written to {where}")
-    say("  Open it, copy the line, and paste it as CLIPKONTRAST_ASR_TOKEN on your computer.")
-    say("  Better: add it as a Kaggle secret with that name, so this notebook finds it by itself next time.")
-    return got
+    raise SystemExit("Set CLIPKONTRAST_ASR_TOKEN in Kaggle Secrets and grant this notebook access before starting it.")
 
 
 def where_data() -> Path:
@@ -153,22 +144,40 @@ def preflight() -> None:
 _tunnel = {"address": ""}
 
 
-def tunnel_port(port: int) -> subprocess.Popen:
+def tunnel_port(port: int, *, binary=TUNNEL_BIN, found_url=None) -> subprocess.Popen:
     """Open the tunnel and keep reading its output on a thread, so its address is caught whenever it appears and
     the program never blocks on a full pipe."""
-    TUNNEL_BIN.parent.mkdir(parents=True, exist_ok=True)
-    if not TUNNEL_BIN.is_file():
-        say("  Downloading the tunnel program (cloudflared)...")
-        subprocess.run(["curl", "-fsSL", "-o", str(TUNNEL_BIN), TUNNEL_URL], check=True)
-        TUNNEL_BIN.chmod(0o755)
-    p = subprocess.Popen([str(TUNNEL_BIN), "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"],
+    def verified(path):
+        digest = hashlib.sha256()
+        with path.open("rb") as src:
+            for block in iter(lambda: src.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest() == TUNNEL_SHA256
+
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    if not binary.is_file() or not verified(binary):
+        say("  Downloading the pinned tunnel program (cloudflared)...")
+        with tempfile.NamedTemporaryFile(dir=binary.parent, delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            subprocess.run(["curl", "-fsSL", "--max-time", "180", "-o", str(tmp), TUNNEL_URL], check=True)
+            if not verified(tmp):
+                raise RuntimeError("Tunnel download did not match its checksum; refusing to run it.")
+            tmp.chmod(0o700)
+            tmp.replace(binary)
+        finally:
+            tmp.unlink(missing_ok=True)
+    p = subprocess.Popen([str(binary), "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     def watch():
         for line in p.stdout or ():
             found = re.search(r"https://[-a-z0-9]+\.trycloudflare\.com", line)
-            if found and not _tunnel["address"]:
-                _tunnel["address"] = found.group(0)
+            if found:
+                if found_url:
+                    found_url(found.group(0))
+                else:
+                    _tunnel["address"] = found.group(0)
 
     import threading
     threading.Thread(target=watch, daemon=True).start()
@@ -185,6 +194,9 @@ def main() -> int:
     data = where_data()
     token = secret()
     setup_env(data, token)
+    os.environ["CLIPKONTRAST_ASR_PORT"] = str(args.port)
+    if not args.no_tunnel:
+        os.environ["CLIPKONTRAST_ASR_HOST"] = "127.0.0.1"
     say(f"  Data and model folder: {data}")
     preflight()
     if not args.no_install:

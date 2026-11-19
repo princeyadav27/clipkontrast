@@ -30,7 +30,7 @@ with ctx.as_user(a.id):
     j_own = video(n=1); jj = jobs.get(j_own["id"]); whole = Path(jj["dir"]) / "whole.mp4"; whole.write_bytes(b"x" * 1000)
     jj["clips"][0]["src"] = str(whole); jobs.save(jj); account.delete_clip(jj["id"], "clip01")
     check("the video's own file is never taken for a clip's piece", whole.exists())
-    z = account.zip_clips([(j1["id"], "clip02"), (j1["id"], "clip03"), (j2["id"], "clip01"), ("nope", "x")])
+    z = account.zip_clips([(j1["id"], "clip02"), (j1["id"], "clip03"), (j2["id"], "clip01")])
     names = zipfile.ZipFile(z).namelist()
     check("several clips download as one zip with distinct names", len(names) == 3 and len(set(names)) == 3, str(names))
     r = account.delete_many([j1["id"], j3["id"]], [(j2["id"], "clip01"), (j1["id"], "clip02")])

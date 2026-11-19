@@ -159,6 +159,7 @@ SESSION_DAYS = int(env("CLIPKONTRAST_SESSION_DAYS", "30"))
 # on your own computer. On a server that other people can reach, set CLIPKONTRAST_ACCOUNTS=1: everyone then signs up
 # and signs in, and each person only sees their own videos.
 ACCOUNTS = env("CLIPKONTRAST_ACCOUNTS", "0") == "1"
+PUBLIC_SIGNUP = env("CLIPKONTRAST_PUBLIC_SIGNUP", "1") != "0"
 # ---------------------------------------------------------------- limits (per user, and for the whole server)
 # Your own ClipKontrast has no limits unless you set them: 0 (the default) means "none" for every limit below. The
 # machine still protects itself: new work waits while the processor, memory or disk are nearly full (load.py).
